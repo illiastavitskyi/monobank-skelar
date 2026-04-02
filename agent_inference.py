@@ -188,29 +188,49 @@ class PricingAgent:
         # 1. Vision Assessment AND Category Prediction via Gemini
         vision_result = {"coefficient": 0.8, "reason": "Помилка аналізу. Дефолт.", "category_id": 4}
         try:
-            model_vision = genai.GenerativeModel('gemini-1.5-flash-latest')
+            available_models = ['gemini-2.5-flash-lite', 'gemini-1.5-pro', 'gemini-1.5-flash', 'gemini-1.0-pro-vision-latest', 'gemini-pro-vision']
+            response_vision = None
+            
             with Image.open(image_path) as img:
-                prompt_vision = (
-                    "You are an expert appraiser. Read the description: " + str(description) + " and look at the item. "
-                    "Select the BEST matching category ID strictly from this dictionary:\n"
-                    "{\n"
-                    "  '4': 'Електроніка/Телефони/Смартфони/Apple',\n"
-                    "  '512': 'Стиль і краса/Взуття/Кросівки',\n"
-                    "  '743': 'Дитячий світ/Конструктори',\n"
-                    "  '795': 'Хобі, спорт і відпочинок/Книги та журнали',\n"
-                    "  '1677': 'Колекції та антикваріат/Колекційні фігурки',\n"
-                    "  '1261': 'Запчастини для транспорту/Шини, диски і колеса/Колеса в зборі',\n"
-                    "  '1320': 'Дім і сад/Меблі/Стільці'\n"
-                    "}\n"
-                    "Also, assess the condition coefficient visually (0.5 for bad to 1.0 for perfect). "
-                    "Output JSON STRICTLY in this format:\n"
-                    "{\"category_id\": 512, \"coefficient\": 0.95, \"reason\": \"Кілька незначних подряпин на корпусі.\"}"
-                )
-                response_vision = model_vision.generate_content(
-                    [img, prompt_vision],
-                    generation_config=genai.GenerationConfig(response_mime_type="application/json")
-                )
-            vision_result = json.loads(response_vision.text)
+                for model_name in available_models:
+                    try:
+                        logging.info(f"Trying Gemini model: {model_name}")
+                        model_vision = genai.GenerativeModel(model_name)
+                        
+                        prompt_vision = (
+                            "You are an expert appraiser. Read the description: " + str(description) + " and look at the item. "
+                            "Select the BEST matching category ID strictly from this dictionary:\n"
+                            "{\n"
+                            "  '4': 'Електроніка/Телефони/Смартфони/Apple',\n"
+                            "  '512': 'Стиль і краса/Взуття/Кросівки',\n"
+                            "  '743': 'Дитячий світ/Конструктори',\n"
+                            "  '795': 'Хобі, спорт і відпочинок/Книги та журнали',\n"
+                            "  '1677': 'Колекції та антикваріат/Колекційні фігурки',\n"
+                            "  '1261': 'Запчастини для транспорту/Шини, диски і колеса/Колеса в зборі',\n"
+                            "  '1320': 'Дім і сад/Меблі/Стільці'\n"
+                            "}\n"
+                            "Also, assess the condition coefficient visually (0.5 for bad to 1.0 for perfect). "
+                            "Output pure JSON STRICTLY in this format, without codeblocks:\n"
+                            "{\"category_id\": 512, \"coefficient\": 0.95, \"reason\": \"Кілька незначних подряпин на корпусі.\"}"
+                        )
+                        
+                        kwargs = {}
+                        if any(v in model_name for v in ['1.5', '2.0', '2.5']):
+                            kwargs['generation_config'] = genai.GenerationConfig(response_mime_type="application/json")
+                            
+                        response_vision = model_vision.generate_content([img, prompt_vision], **kwargs)
+                        
+                        raw_text = response_vision.text.replace("```json", "").replace("```", "").strip()
+                        vision_result = json.loads(raw_text)
+                        
+                        logging.info(f"Successfully used {model_name}")
+                        break
+                    except Exception as e:
+                        logging.warning(f"Failed with {model_name}: {e}")
+                        
+            if not response_vision:
+                raise Exception("Помилка: всі версії моделей Gemini виявилися недоступними (404/API Error).")
+                
         except Exception as e:
             logging.error(f"Gemini API Error: {e}")
             vision_result["reason"] = f"Помилка Gemini API: {str(e)}"
