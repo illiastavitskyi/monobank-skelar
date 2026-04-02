@@ -12,6 +12,7 @@ from PIL import Image
 import joblib
 import os
 import json
+from collections import Counter
 import google.generativeai as genai
 from dotenv import load_dotenv
 from llm_prompts import build_prompt
@@ -96,14 +97,16 @@ class PricingAgent:
             logging.warning(f"TFIDF file missing at {TFIDF_PATH}, text feature vectors will be all zeroes.")
             self.tfidf = None
             
-        # 6. Мапа реальних назв товарів
+        # 6. Мапа реальних назв та категорій товарів
         self.titles_map = {}
+        self.category_map = {}
         try:
             titles_path = ROOT_DIR.parent / "hackaton_advertisements_with_id.csv"
             if titles_path.exists():
-                titles_df = pd.read_csv(titles_path, usecols=["advertisement_id", "title"])
+                titles_df = pd.read_csv(titles_path, usecols=["advertisement_id", "title", "category_id"])
                 self.titles_map = dict(zip(titles_df["advertisement_id"].astype(str), titles_df["title"].astype(str)))
-                logging.info(f"Loaded {len(self.titles_map)} titles for analogs.")
+                self.category_map = dict(zip(titles_df["advertisement_id"].astype(str), titles_df["category_id"]))
+                logging.info(f"Loaded {len(self.titles_map)} titles & categories for analogs.")
         except Exception as e:
             logging.warning(f"Could not load titles map: {e}")
         
@@ -152,16 +155,19 @@ class PricingAgent:
         results = self.collection.query(query_embeddings=[emb], n_results=n_results)
         neighbor_prices = []
         similar_items_info = []
+        found_categories = []
         
         if results and results.get("metadatas") is not None:
             for i, meta in enumerate(results["metadatas"][0]):
                 price = meta.get("sold_price", 0)
                 if price > 0:
-                    neighbor_prices.append(price)
-                    
                     adv_id = str(meta.get("advertisement_id", ""))
                     
-                    # Пріоритет: Словник з CSV -> Метадані бази -> Fallback
+                    if adv_id in self.category_map:
+                        found_categories.append(self.category_map[adv_id])
+                        
+                    neighbor_prices.append(price)
+                    
                     real_title = self.titles_map.get(adv_id) or meta.get("title")
                     
                     if real_title:
@@ -176,71 +182,23 @@ class PricingAgent:
                         "sold_price": price
                     })
                 
+        avg_price = DEFAULT_VISUAL_PRICE
         if neighbor_prices:
             avg_price = float(np.median(neighbor_prices[:5]))
-            return avg_price, similar_items_info[:5]
-        else:
-            return DEFAULT_VISUAL_PRICE, []
+            
+        predicted_category = 4
+        if found_categories:
+            predicted_category = int(Counter(found_categories).most_common(1)[0][0])
+            
+        return avg_price, similar_items_info[:5], predicted_category
 
     def analyze_for_frontend(self, description, image_path):
         logging.info("Analyze for frontend started...")
         
-        # 1. Vision Assessment AND Category Prediction via Gemini
-        vision_result = {"coefficient": 0.8, "reason": "Помилка аналізу. Дефолт.", "category_id": 4}
-        try:
-            available_models = ['gemini-2.5-flash-lite', 'gemini-1.5-pro', 'gemini-1.5-flash', 'gemini-1.0-pro-vision-latest', 'gemini-pro-vision']
-            response_vision = None
-            
-            with Image.open(image_path) as img:
-                for model_name in available_models:
-                    try:
-                        logging.info(f"Trying Gemini model: {model_name}")
-                        model_vision = genai.GenerativeModel(model_name)
-                        
-                        prompt_vision = (
-                            "You are an expert appraiser. Read the description: " + str(description) + " and look at the item. "
-                            "Select the BEST matching category ID strictly from this dictionary:\n"
-                            "{\n"
-                            "  '4': 'Електроніка/Телефони/Смартфони/Apple',\n"
-                            "  '512': 'Стиль і краса/Взуття/Кросівки',\n"
-                            "  '743': 'Дитячий світ/Конструктори',\n"
-                            "  '795': 'Хобі, спорт і відпочинок/Книги та журнали',\n"
-                            "  '1677': 'Колекції та антикваріат/Колекційні фігурки',\n"
-                            "  '1261': 'Запчастини для транспорту/Шини, диски і колеса/Колеса в зборі',\n"
-                            "  '1320': 'Дім і сад/Меблі/Стільці'\n"
-                            "}\n"
-                            "Also, assess the condition coefficient visually (0.5 for bad to 1.0 for perfect). "
-                            "Output pure JSON STRICTLY in this format, without codeblocks:\n"
-                            "{\"category_id\": 512, \"coefficient\": 0.95, \"reason\": \"Кілька незначних подряпин на корпусі.\"}"
-                        )
-                        
-                        kwargs = {}
-                        if any(v in model_name for v in ['1.5', '2.0', '2.5']):
-                            kwargs['generation_config'] = genai.GenerationConfig(response_mime_type="application/json")
-                            
-                        response_vision = model_vision.generate_content([img, prompt_vision], **kwargs)
-                        
-                        raw_text = response_vision.text.replace("```json", "").replace("```", "").strip()
-                        vision_result = json.loads(raw_text)
-                        
-                        logging.info(f"Successfully used {model_name}")
-                        break
-                    except Exception as e:
-                        logging.warning(f"Failed with {model_name}: {e}")
-                        
-            if not response_vision:
-                raise Exception("Помилка: всі версії моделей Gemini виявилися недоступними (404/API Error).")
-                
-        except Exception as e:
-            logging.error(f"Gemini API Error: {e}")
-            vision_result["reason"] = f"Помилка Gemini API: {str(e)}"
-            
-        guessed_category = int(vision_result.get("category_id", 4))
-        logging.info(f"Gemini guessed category: {guessed_category}")
-        
-        # 2. Base Prices via XGBoost
+        # 1. Base Prices via XGBoost & ChromaDB (k-NN category)
         text_features = self.extract_text_features(description)
-        visual_price, comparatives = self.get_visual_competitor_price(image_path, description_fallback=str(description), n_results=10)
+        visual_price, comparatives, guessed_category = self.get_visual_competitor_price(image_path, description_fallback=str(description), n_results=10)
+        logging.info(f"k-NN predicted category: {guessed_category}")
         
         if self.tfidf:
             text_tfidf = self.tfidf.transform([str(description)]).toarray()[0]
@@ -268,6 +226,46 @@ class PricingAgent:
         price_bal = float(self.model_bal.predict(df_input)[0])
         price_max = float(self.model_max.predict(df_input)[0])
 
+        # 2. Vision Assessment via Gemini
+        vision_result = {"coefficient": 0.8, "reason": "Помилка аналізу. Дефолт."}
+        try:
+            available_models = ['gemini-2.5-flash-lite', 'gemini-1.5-pro', 'gemini-1.5-flash', 'gemini-1.0-pro-vision-latest', 'gemini-pro-vision']
+            response_vision = None
+            
+            with Image.open(image_path) as img:
+                for model_name in available_models:
+                    try:
+                        logging.info(f"Trying Gemini model: {model_name}")
+                        model_vision = genai.GenerativeModel(model_name)
+                        
+                        prompt_vision = (
+                            "You are an expert appraiser. Look at this item. "
+                            "Assess the condition coefficient visually (0.5 for bad/broken to 1.0 for perfect). "
+                            "Output pure JSON STRICTLY in this format, without codeblocks:\n"
+                            "{\"coefficient\": 0.95, \"reason\": \"Кілька незначних подряпин на корпусі.\"}"
+                        )
+                        
+                        kwargs = {}
+                        if any(v in model_name for v in ['1.5', '2.0', '2.5']):
+                            kwargs['generation_config'] = genai.GenerationConfig(response_mime_type="application/json")
+                            
+                        response_vision = model_vision.generate_content([img, prompt_vision], **kwargs)
+                        
+                        raw_text = response_vision.text.replace("```json", "").replace("```", "").strip()
+                        vision_result = json.loads(raw_text)
+                        
+                        logging.info(f"Successfully used {model_name}")
+                        break
+                    except Exception as e:
+                        logging.warning(f"Failed with {model_name}: {e}")
+                        
+            if not response_vision:
+                raise Exception("Помилка: всі версії моделей Gemini виявилися недоступними (404/API Error).")
+                
+        except Exception as e:
+            logging.error(f"Gemini API Error: {e}")
+            vision_result["reason"] = f"Помилка Gemini API: {str(e)}"
+            
         return {
             "prices": {
                 "fast": price_fast,
@@ -277,7 +275,7 @@ class PricingAgent:
             "analogs": comparatives,
             "vision": {
                 "coefficient": vision_result.get("coefficient", 0.8),
-                "reason": vision_result.get("reason", "Дефолтний результат.") + f" Категорія: {guessed_category}"
+                "reason": vision_result.get("reason", "Дефолтний результат.") + f" (Категорія: {guessed_category})"
             }
         }
 
