@@ -83,6 +83,22 @@ class GeminiProvider(LLMProvider):
         self._client = genai.Client(api_key=api_key)
 
     @staticmethod
+    def _to_float(value) -> float:
+        """Convert LLM price value to float, handling '₴4500', '950 - 1300', etc."""
+        if isinstance(value, (int, float)):
+            return float(value)
+        import re
+        cleaned = str(value).replace("₴", "").replace(",", "").strip()
+        # range string like "950 - 1300" → take midpoint
+        parts = re.split(r"\s*[\–\-—]\s*", cleaned)
+        if len(parts) == 2:
+            try:
+                return (float(parts[0]) + float(parts[1])) / 2
+            except ValueError:
+                pass
+        return float(cleaned)
+
+    @staticmethod
     def _parse_json_response(text: str) -> dict:
         import json
         text = text.strip()
@@ -125,9 +141,12 @@ class GeminiProvider(LLMProvider):
         parts.append(prompt)
         response = self._client.models.generate_content(model=self.MODEL, contents=parts)
         data = self._parse_json_response(response.text)
+        f = self._to_float
+        pr = data["price_range"]
+        price_range = (f(pr[0]), f(pr[1])) if isinstance(pr, list) else (f(pr), f(pr))
         return PricingResult(
-            recommended_price=float(data["recommended_price"]),
-            price_range=(float(data["price_range"][0]), float(data["price_range"][1])),
+            recommended_price=f(data["recommended_price"]),
+            price_range=price_range,
             strategies=data["strategies"],
             evidence=data["evidence"],
             condition_assessment=data["condition_assessment"],
