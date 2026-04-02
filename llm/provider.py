@@ -76,7 +76,7 @@ class MockProvider(LLMProvider):
 
 
 class GeminiProvider(LLMProvider):
-    MODEL = "gemini-3.1-flash-lite-preview"
+    MODEL = "gemini-2.5-flash-lite"
 
     def __init__(self, api_key: str):
         from google import genai

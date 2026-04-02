@@ -49,19 +49,12 @@ class RetrievalEngine:
     def find_similar(
         self,
         query: str,
-        category_id: str | None = None,
         top_k: int = config.RAG_TOP_K,
     ) -> list[dict]:
-        """Return top-k comparable listings for the query.
-
-        When category_id is given, over-fetches then post-filters so the
-        interface is identical regardless of backend.
-        """
+        """Return top-k comparable listings for the query."""
         t0 = time.perf_counter()
 
-        # Over-fetch when filtering to ensure enough results survive the filter
-        fetch_k = top_k * 8 if category_id else top_k
-        scores, indices = self._backend.search(query, top_k=fetch_k)
+        scores, indices = self._backend.search(query, top_k=top_k)
 
         df = self._data.df
         results: list[dict] = []
@@ -69,8 +62,6 @@ class RetrievalEngine:
             if idx < 0 or idx >= len(df):
                 continue
             row = df.iloc[int(idx)]
-            if category_id and row["category_id"] != str(category_id):
-                continue
             results.append({
                 "title": row["title"],
                 "status": row["status"],
@@ -85,32 +76,6 @@ class RetrievalEngine:
                 "category_name": self._data.category_dict.get(str(row["category_id"]), ""),
                 "similarity_score": round(float(score), 4),
             })
-            if len(results) >= top_k:
-                break
-
-        # If category filter yielded too few results, fall back to unfiltered
-        if category_id and len(results) < top_k // 2:
-            scores, indices = self._backend.search(query, top_k=top_k)
-            for score, idx in zip(scores, indices):
-                if idx < 0 or idx >= len(df):
-                    continue
-                row = df.iloc[int(idx)]
-                results.append({
-                    "title": row["title"],
-                    "status": row["status"],
-                    "original_price": row["original_price"],
-                    "sold_price": (
-                        row["sold_price"]
-                        if not pd.isna(row.get("sold_price", float("nan")))
-                        else None
-                    ),
-                    "sold_via_bargain": row.get("sold_via_bargain"),
-                    "category_id": row["category_id"],
-                    "category_name": self._data.category_dict.get(str(row["category_id"]), ""),
-                    "similarity_score": round(float(score), 4),
-                })
-                if len(results) >= top_k:
-                    break
 
         elapsed_ms = round((time.perf_counter() - t0) * 1000, 1)
         return results

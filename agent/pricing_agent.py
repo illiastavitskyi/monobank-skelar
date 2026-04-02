@@ -64,11 +64,24 @@ class PricingAgent:
             self.engine.get_category_stats(str(effective_category_id)) if effective_category_id else None
         )
 
-        # Step 2: Search using clean query and inferred category
+        # Step 2: Build rich query from all extracted features + category context, single search
+        query_parts = []
+        if category_name:
+            query_parts.append(category_name)
+        llm_cat = parsed.suggested_category_id
+        if llm_cat and llm_cat != effective_category_id:
+            llm_cat_name = self.engine.category_dict.get(str(llm_cat))
+            if llm_cat_name:
+                query_parts.append(llm_cat_name)
+        query_parts.append(parsed.item_name)
+        if parsed.quality:
+            query_parts.append(parsed.quality)
+        if parsed.additional_info:
+            query_parts.append(parsed.additional_info)
+        rich_query = " ".join(query_parts)
+
         t1 = time.perf_counter()
-        comparables = self.engine.find_similar(
-            parsed.search_query, category_id=effective_category_id, top_k=config.RAG_TOP_K
-        )
+        comparables = self.engine.find_similar(rich_query, top_k=config.RAG_TOP_K)
         print(f"[timer] search: {time.perf_counter() - t1:.2f}s")
 
         # Step 3: Gemini — pricing from extracted features + comparables (text only, no image)
