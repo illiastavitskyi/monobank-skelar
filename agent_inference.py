@@ -10,17 +10,31 @@ import numpy as np
 import xgboost as xgb
 from PIL import Image
 import joblib
+import os
+import json
+import google.generativeai as genai
+from dotenv import load_dotenv
+from llm_prompts import build_prompt
+
+load_dotenv()
+
+try:
+    genai.configure(api_key=os.environ.get("GEMINI_API_KEY", ""))
+except Exception:
+    pass
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
 
 # === НАЛАШТУВАННЯ ШЛЯХІВ ===
-BASE_DIR = Path(__file__).resolve().parent / "data"
-ROBERTA_WEIGHTS = Path(__file__).resolve().parent / "roberta_student_weights.pth"
-XGB_FAST = BASE_DIR / "xgb_fast.json"
-XGB_BAL = BASE_DIR / "xgb_bal.json"
-XGB_MAX = BASE_DIR / "xgb_max.json"
+ROOT_DIR = Path(__file__).resolve().parent
+BASE_DIR = ROOT_DIR / "data"
+
+ROBERTA_WEIGHTS = ROOT_DIR / "roberta_student_weights.pth"
+XGB_FAST = ROOT_DIR / "xgb_fast.json"
+XGB_BAL = ROOT_DIR / "xgb_bal.json"
+XGB_MAX = ROOT_DIR / "xgb_max.json"
 TFIDF_PATH = BASE_DIR / "tfidf_vectorizer.pkl"
-CHROMA_PATH = str(BASE_DIR / "chroma_db")
+CHROMA_PATH = str(ROOT_DIR / "chroma_db")
 
 MODEL_NAME = "xlm-roberta-base"
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -76,7 +90,22 @@ class PricingAgent:
         self.model_max.load_model(XGB_MAX)
         
         # 5. TF-IDF Векторизатор (для розуміння характеристик товару)
-        self.tfidf = joblib.load(TFIDF_PATH)
+        if TFIDF_PATH.exists():
+            self.tfidf = joblib.load(TFIDF_PATH)
+        else:
+            logging.warning(f"TFIDF file missing at {TFIDF_PATH}, text feature vectors will be all zeroes.")
+            self.tfidf = None
+            
+        # 6. Мапа реальних назв товарів
+        self.titles_map = {}
+        try:
+            titles_path = ROOT_DIR.parent / "hackaton_advertisements_with_id.csv"
+            if titles_path.exists():
+                titles_df = pd.read_csv(titles_path, usecols=["advertisement_id", "title"])
+                self.titles_map = dict(zip(titles_df["advertisement_id"].astype(str), titles_df["title"].astype(str)))
+                logging.info(f"Loaded {len(self.titles_map)} titles for analogs.")
+        except Exception as e:
+            logging.warning(f"Could not load titles map: {e}")
         
         logging.info("Агент готовий до роботи!")
 
@@ -100,30 +129,137 @@ class PricingAgent:
             "comp_prob_0": probs_comp[0], "comp_prob_1": probs_comp[1]
         }
 
-    def get_visual_competitor_price(self, image_path):
-        image = Image.open(image_path).convert("RGB")
+    def get_visual_competitor_price(self, image_path, description_fallback="", n_results=15):
+        with Image.open(image_path) as f_img:
+            image = f_img.convert("RGB")
+        
         with torch.no_grad():
             inputs = self.clip_processor(images=image, return_tensors="pt").to(DEVICE)
             features = self.clip_model.get_image_features(**inputs)
-            features /= features.norm(p=2, dim=-1, keepdim=True)
+            
+            # Якщо features це об'єкт (наприклад BaseModelOutputWithPooling), дістаємо тензор
+            if not isinstance(features, torch.Tensor):
+                if hasattr(features, 'image_embeds'):
+                    features = features.image_embeds
+                elif hasattr(features, 'pooler_output'):
+                    features = features.pooler_output
+                else:
+                    features = features[0]
+                    
+            features = features / features.norm(p=2, dim=-1, keepdim=True)
             emb = features.cpu().numpy().tolist()[0]
             
-        results = self.collection.query(query_embeddings=[emb], n_results=15)
+        results = self.collection.query(query_embeddings=[emb], n_results=n_results)
         neighbor_prices = []
         similar_items_info = []
         
         if results and results.get("metadatas") is not None:
-            for meta in results["metadatas"][0]:
+            for i, meta in enumerate(results["metadatas"][0]):
                 price = meta.get("sold_price", 0)
                 if price > 0:
                     neighbor_prices.append(price)
-                    similar_items_info.append({"id": meta.get("advertisement_id"), "price": price})
+                    
+                    adv_id = str(meta.get("advertisement_id", ""))
+                    
+                    # Пріоритет: Словник з CSV -> Метадані бази -> Fallback
+                    real_title = self.titles_map.get(adv_id) or meta.get("title")
+                    
+                    if real_title:
+                        human_title = f"{real_title}"
+                    else:
+                        short_id = adv_id[:8]
+                        human_title = f"Схожий товар ({short_id})"
+                        
+                    similar_items_info.append({
+                        "id": adv_id, 
+                        "title": human_title,
+                        "sold_price": price
+                    })
                 
         if neighbor_prices:
             avg_price = float(np.median(neighbor_prices[:5]))
             return avg_price, similar_items_info[:5]
         else:
             return DEFAULT_VISUAL_PRICE, []
+
+    def analyze_for_frontend(self, description, image_path):
+        logging.info("Analyze for frontend started...")
+        
+        # 1. Vision Assessment AND Category Prediction via Gemini
+        vision_result = {"coefficient": 0.8, "reason": "Помилка аналізу. Дефолт.", "category_id": 4}
+        try:
+            model_vision = genai.GenerativeModel('gemini-1.5-flash-latest')
+            with Image.open(image_path) as img:
+                prompt_vision = (
+                    "You are an expert appraiser. Read the description: " + str(description) + " and look at the item. "
+                    "Select the BEST matching category ID strictly from this dictionary:\n"
+                    "{\n"
+                    "  '4': 'Електроніка/Телефони/Смартфони/Apple',\n"
+                    "  '512': 'Стиль і краса/Взуття/Кросівки',\n"
+                    "  '743': 'Дитячий світ/Конструктори',\n"
+                    "  '795': 'Хобі, спорт і відпочинок/Книги та журнали',\n"
+                    "  '1677': 'Колекції та антикваріат/Колекційні фігурки',\n"
+                    "  '1261': 'Запчастини для транспорту/Шини, диски і колеса/Колеса в зборі',\n"
+                    "  '1320': 'Дім і сад/Меблі/Стільці'\n"
+                    "}\n"
+                    "Also, assess the condition coefficient visually (0.5 for bad to 1.0 for perfect). "
+                    "Output JSON STRICTLY in this format:\n"
+                    "{\"category_id\": 512, \"coefficient\": 0.95, \"reason\": \"Кілька незначних подряпин на корпусі.\"}"
+                )
+                response_vision = model_vision.generate_content(
+                    [img, prompt_vision],
+                    generation_config=genai.GenerationConfig(response_mime_type="application/json")
+                )
+            vision_result = json.loads(response_vision.text)
+        except Exception as e:
+            logging.error(f"Gemini API Error: {e}")
+            vision_result["reason"] = f"Помилка Gemini API: {str(e)}"
+            
+        guessed_category = int(vision_result.get("category_id", 4))
+        logging.info(f"Gemini guessed category: {guessed_category}")
+        
+        # 2. Base Prices via XGBoost
+        text_features = self.extract_text_features(description)
+        visual_price, comparatives = self.get_visual_competitor_price(image_path, description_fallback=str(description), n_results=10)
+        
+        if self.tfidf:
+            text_tfidf = self.tfidf.transform([str(description)]).toarray()[0]
+        else:
+            text_tfidf = np.zeros(20)
+            
+        features_dict = {**text_features, 'visual_competitor_price': visual_price}
+        for i in range(20):
+            features_dict[f'tfidf_{i}'] = float(text_tfidf[i])
+            
+        features_dict['category_id'] = guessed_category
+        
+        feature_cols = [
+            'cosm_prob_0', 'cosm_prob_1', 'cosm_prob_2',
+            'func_prob_0', 'func_prob_1',
+            'comp_prob_0', 'comp_prob_1',
+            'visual_competitor_price'
+        ]
+        feature_cols.extend([f'tfidf_{i}' for i in range(20)])
+        feature_cols.append('category_id')
+        
+        df_input = pd.DataFrame([features_dict])[feature_cols]
+        
+        price_fast = float(self.model_fast.predict(df_input)[0])
+        price_bal = float(self.model_bal.predict(df_input)[0])
+        price_max = float(self.model_max.predict(df_input)[0])
+
+        return {
+            "prices": {
+                "fast": price_fast,
+                "balanced": price_bal,
+                "max": price_max
+            },
+            "analogs": comparatives,
+            "vision": {
+                "coefficient": vision_result.get("coefficient", 0.8),
+                "reason": vision_result.get("reason", "Дефолтний результат.") + f" Категорія: {guessed_category}"
+            }
+        }
 
     def predict(self, description, image_path, category_id=None):
         # 1. Аналіз стану з тексту (RoBERTa)
@@ -133,7 +269,10 @@ class PricingAgent:
         visual_price, comparatives = self.get_visual_competitor_price(image_path)
 
         # 3. Аналіз ключових слів (TF-IDF)
-        text_tfidf = self.tfidf.transform([str(description)]).toarray()[0]
+        if self.tfidf:
+            text_tfidf = self.tfidf.transform([str(description)]).toarray()[0]
+        else:
+            text_tfidf = np.zeros(20)
 
         # 4. Формування словника ознак
         features_dict = {**text_features, 'visual_competitor_price': visual_price}
@@ -174,27 +313,98 @@ class PricingAgent:
         cosm_labels = {0: "зі слідами використання", 1: "у гарному стані", 2: "в ідеальному стані"}
         cosm_text = cosm_labels.get(cosm_idx, "у невідомому стані")
 
-        human_explanation = (
-            f"🧠 Аналіз тексту: Нейромережа визначила, що товар {func_text} "
-            f"(впевненість {func_confidence:.0%}). Візуально він {cosm_text} та продається {comp_text}."
+        # Call Gemini (замість Qwen)
+        gemini_prompt = build_prompt(
+            description=description,
+            category_name=f"Category {category_id}",
+            category_stats=None,
+            comparables=comparatives[:10],
+            quality=cosm_text,
+            additional_info=f"Functionality: {func_text}. Completeness: {comp_text}.",
+            assessed_price_range=(price_fast, price_max)
         )
-
-        result = {
-            "recommended_price": round(price_bal),
-            "price_range": f"{round(price_fast)} - {round(price_max)} грн",
-            "strategies": {
-                "fast": round(price_fast),
-                "balanced": round(price_bal),
-                "max_profit": round(price_max)
-            },
-            "explanation": {
+        
+        try:
+            model_text = genai.GenerativeModel('gemini-1.5-pro')
+            response = model_text.generate_content(
+                gemini_prompt,
+                generation_config=genai.GenerationConfig(response_mime_type="application/json")
+            )
+            result = json.loads(response.text)
+            
+            # Додаємо наші локальні змінні в результат для Streamlit (як було раніше)
+            result["explanation"] = {
                 "text_analysis_conclusion": human_explanation,
                 "visual_anchor_price": round(visual_price),
                 "comparatives_found": len(comparatives),
                 "similar_items": comparatives
             }
+            return result
+        except Exception as e:
+            logging.error(f"Gemini API error: {e}")
+            # Fallback у випадку помилки API
+            return {
+                "recommended_price": round(price_bal),
+                "price_range": [round(price_fast), round(price_max)],
+                "condition_assessment": cosm_text,
+                "strategies": [
+                    {"name": "Quick Sale", "emoji": "⚡", "price": round(price_fast), "explanation": "Fallback Fast"},
+                    {"name": "Balanced", "emoji": "⚖️", "price": round(price_bal), "explanation": "Fallback Balanced"},
+                    {"name": "Max Profit", "emoji": "💰", "price": round(price_max), "explanation": "Fallback Max"}
+                ],
+                "explanation": {
+                    "text_analysis_conclusion": human_explanation,
+                    "visual_anchor_price": round(visual_price),
+                    "comparatives_found": len(comparatives),
+                    "similar_items": comparatives
+                }
+            }
+
+    def predict_without_category(self, description, image_path):
+        logging.info("Predict without category started...")
+        # 1. Gemini Vision to detect category and features
+        try:
+            model_vision = genai.GenerativeModel('gemini-1.5-flash')
+            img = Image.open(image_path)
+            prompt_vision = "Analyze this image and concisely describe what the item is, its condition, and any notable features. Answer in Ukrainian."
+            response_vision = model_vision.generate_content([img, prompt_vision])
+            vision_desc = response_vision.text
+        except Exception as e:
+            vision_desc = f"Error calling Gemini Vision: {e}"
+
+        # 2. Get comparables from ChromaDB based on image (n=20)
+        visual_price, comparatives = self.get_visual_competitor_price(image_path, n_results=20)
+        
+        # 3. Build Prompt for Gemini LLM
+        prompt = build_prompt(
+            description=description,
+            category_name=None,
+            category_stats=None,
+            comparables=comparatives,
+            additional_info=f"Gemini Vision Output: {vision_desc}"
+        )
+
+        # 4. Call Gemini LLM for price prediction
+        try:
+            model_text = genai.GenerativeModel('gemini-1.5-pro')
+            response = model_text.generate_content(
+                prompt,
+                generation_config=genai.GenerationConfig(response_mime_type="application/json")
+            )
+            result = json.loads(response.text)
+        except Exception as e:
+            logging.error(f"Gemini API Error: {e}")
+            raise Exception(f"Gemini API Error: {e}")
+
+        # format output identically for app.py
+        result["explanation"] = {
+            "text_analysis_conclusion": f"Визначено через Gemini Vision: {vision_desc}",
+            "visual_anchor_price": round(visual_price),
+            "comparatives_found": len(comparatives),
+            "similar_items": comparatives[:5]
         }
         return result
+
 
 
 if __name__ == "__main__":
