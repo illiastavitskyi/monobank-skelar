@@ -1,3 +1,7 @@
+"""
+Legacy prompt builder — was used by the old predict() / predict_without_category() pipeline.
+Kept here for reference. Not used in the production app.
+"""
 import json
 
 SYSTEM_ROLE = (
@@ -91,11 +95,7 @@ def build_prompt(
     if comparables:
         parts.append("## Comparable Listings")
         for i, item in enumerate(comparables, 1):
-            price_info = (
-                f"sold for ₴{item['price']}"
-                if item.get("price")
-                else f"unknown status/price"
-            )
+            price_info = f"sold for ₴{item['price']}" if item.get("price") else "unknown status/price"
             parts.append(f"{i}. ID: {item.get('id', '?')} — {price_info}")
         parts.append("")
 

@@ -1,52 +1,45 @@
-import tempfile
 import os
+import tempfile
 from typing import List
+
 from fastapi import FastAPI, File, UploadFile, Form
 from fastapi.responses import HTMLResponse, JSONResponse
-from dotenv import load_dotenv
 
-from agent_inference import PricingAgent
-
-load_dotenv()
+from app.agent import PricingAgent
+from config import FRONTEND_HTML, HOST, PORT, RELOAD
 
 app = FastAPI()
 agent = PricingAgent()
 
+
 @app.get("/", response_class=HTMLResponse)
 async def read_root():
-    with open("index.html", "r", encoding="utf-8") as f:
-        return f.read()
+    return FRONTEND_HTML.read_text(encoding="utf-8")
+
 
 @app.post("/analyze")
-async def analyze_item(
-    title: str = Form(...),
-    files: List[UploadFile] = File(...)
-):
+async def analyze_item(title: str = Form(...), files: List[UploadFile] = File(...)):
+    tmp_paths = []
     try:
-        tmp_image_paths = []
-        try:
-            # Save uploaded images temporarily
-            for file in files:
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp_file:
-                    content = await file.read()
-                    tmp_file.write(content)
-                    tmp_image_paths.append(tmp_file.name)
+        for file in files:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
+                tmp.write(await file.read())
+                tmp_paths.append(tmp.name)
 
-            # We call the new method analyze_for_frontend
-            result = agent.analyze_for_frontend(description=title, image_paths=tmp_image_paths)
-            return JSONResponse(content=result)
-        finally:
-            for p in tmp_image_paths:
-                try:
-                    if os.path.exists(p):
-                        os.remove(p)
-                except Exception:
-                    pass
+        result = agent.analyze(description=title, image_paths=tmp_paths)
+        return JSONResponse(content=result.to_dict())
     except Exception as e:
         import traceback
         traceback.print_exc()
         return JSONResponse(status_code=500, content={"error": str(e)})
+    finally:
+        for path in tmp_paths:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("main:app", host=HOST, port=PORT, reload=RELOAD)

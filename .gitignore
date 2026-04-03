@@ -1,1 +1,46 @@
-.idea
+# IDEs
+.idea/
+.vscode/
+*.iml
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+
+# uv
+.python-version
+.uv/
+
+# Environment variables
+.env
+*.env
+!.env.example
+
+# Data — large files and models (not for git)
+data/*.csv
+data/*.pkl
+data/*.pth
+data/*.json
+data/chroma_db/
+
+# Jupyter
+.ipynb_checkpoints/
+notebooks/.ipynb_checkpoints/
+
+# macOS
+.DS_Store
+**/.DS_Store
+
+# Temp / logs
+*.log
+tmp/
+temp/
