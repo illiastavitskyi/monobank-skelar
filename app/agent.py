@@ -26,8 +26,6 @@ from config import (
 from app.prompts import build_vision_prompt
 from app.schemas import AnalogItem, AnalysisResult, PriceEstimate, VisionAssessment
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
-
 try:
     genai.configure(api_key=GEMINI_API_KEY)
 except Exception:
@@ -126,6 +124,8 @@ class PricingAgent:
                     features = self.clip_model.get_image_features(
                         **self.clip_processor(images=image, return_tensors="pt").to(DEVICE)
                     )
+                    if hasattr(features, "pooler_output"):
+                        features = features.pooler_output
                     features = features / features.norm(p=2, dim=-1, keepdim=True)
                     embeddings.append(features.cpu().numpy()[0])
             except Exception as e:
@@ -149,6 +149,10 @@ class PricingAgent:
             title = self.titles_map.get(adv_id) or meta.get("title") or f"Схожий товар ({adv_id[:8]})"
             prices.append(price)
             analogs.append(AnalogItem(id=adv_id, title=title, sold_price=price))
+
+        raw = results.get("metadatas", [[]])[0]
+        logging.info(f"k-NN raw: {len(raw)} neighbours, sold_prices={[m.get('sold_price') for m in raw]}")
+        logging.info(f"k-NN analogs: {[(a.title, a.sold_price) for a in analogs]}")
 
         competitor_price = float(np.median(prices[:5])) if prices else DEFAULT_VISUAL_PRICE
         category = int(Counter(categories).most_common(1)[0][0]) if categories else 4
@@ -202,25 +206,32 @@ class PricingAgent:
     def analyze(self, description: str, image_paths: List[str]) -> AnalysisResult:
         t_start = time.time()
 
-        text_feats = self._text_features(description)
-
+        t0 = time.time()
         embedding = self._clip_embedding(image_paths)
         if embedding is None:
             visual_price, analogs, category = DEFAULT_VISUAL_PRICE, [], 4
         else:
             visual_price, analogs, category = self._knn_lookup(embedding)
-        logging.info(f"k-NN — category: {category}, visual price: {visual_price:.0f} ({time.time() - t_start:.2f}s)")
+        logging.info(f"[1] CLIP + k-NN:      {time.time() - t0:.2f}s  (category={category}, price={visual_price:.0f})")
 
+        t0 = time.time()
+        text_feats = self._text_features(description)
         tfidf_vec = (
             self.tfidf.transform([description]).toarray()[0]
             if self.tfidf
             else np.zeros(N_TFIDF_FEATURES)
         )
-        prices = self._xgboost_prices(text_feats, visual_price, category, tfidf_vec)
-        logging.info(f"XGBoost — fast:{prices.fast:.0f} bal:{prices.balanced:.0f} max:{prices.max:.0f}")
+        logging.info(f"[2] RoBERTa + TF-IDF: {time.time() - t0:.2f}s")
 
+        t0 = time.time()
+        prices = self._xgboost_prices(text_feats, visual_price, category, tfidf_vec)
+        logging.info(f"[3] XGBoost:          {time.time() - t0:.2f}s  (fast={prices.fast:.0f} bal={prices.balanced:.0f} max={prices.max:.0f})")
+
+        t0 = time.time()
         vision = self._gemini_vision_assessment(description, image_paths)
-        logging.info(f"Gemini — coefficient: {vision.coefficient} | total: {time.time() - t_start:.2f}s")
+        logging.info(f"[4] Gemini Vision:    {time.time() - t0:.2f}s  (coeff={vision.coefficient})")
+
+        logging.info(f"    TOTAL:            {time.time() - t_start:.2f}s")
 
         vision.reason += f" (Категорія: {category})"
         return AnalysisResult(prices=prices, analogs=analogs, vision=vision)

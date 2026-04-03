@@ -1,9 +1,12 @@
+import logging
 import os
 import tempfile
 import traceback
 from typing import List
 
 import uvicorn
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
 from fastapi import FastAPI, File, UploadFile, Form
 from fastapi.responses import HTMLResponse, JSONResponse
 
