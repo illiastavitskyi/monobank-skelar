@@ -8,12 +8,14 @@ RUN pip install uv --no-cache-dir
 # Copy dependency files first (layer cache)
 COPY pyproject.toml uv.lock ./
 
-# Install dependencies
+# Install dependencies (add fastapi, uvicorn, python-multipart)
 RUN uv sync --no-dev --frozen
 
-# Copy source
+# Copy source (includes your HTML file and backend)
 COPY . .
 
-EXPOSE 7860
+# Expose port (FastAPI default)
+EXPOSE 8000
 
-CMD ["uv", "run", "python", "app.py"]
+# Run your FastAPI app (not Gradio)
+CMD ["uv", "run", "uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
