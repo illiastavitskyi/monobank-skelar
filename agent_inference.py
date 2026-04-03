@@ -197,7 +197,7 @@ class PricingAgent:
         
         # 1. Base Prices via XGBoost & ChromaDB (k-NN category)
         text_features = self.extract_text_features(description)
-        visual_price, comparatives, guessed_category = self.get_visual_competitor_price(image_path, description_fallback=str(description), n_results=10)
+        visual_price, comparatives, guessed_category = self.get_visual_competitor_price(image_path, description_fallback=str(description), n_results=20)
         logging.info(f"k-NN predicted category: {guessed_category}")
         
         if self.tfidf:
@@ -227,9 +227,9 @@ class PricingAgent:
         price_max = float(self.model_max.predict(df_input)[0])
 
         # 2. Vision Assessment via Gemini
-        vision_result = {"coefficient": 0.8, "reason": "Помилка аналізу. Дефолт."}
+        vision_result = {"coefficient": 1.0, "reason": "Помилка аналізу. Дефолт."}
         try:
-            available_models = ['gemini-2.5-flash-lite', 'gemini-1.5-pro', 'gemini-1.5-flash', 'gemini-1.0-pro-vision-latest', 'gemini-pro-vision']
+            available_models = ['gemini-3.1-flash-lite-preview']
             response_vision = None
             
             with Image.open(image_path) as img:
@@ -239,14 +239,15 @@ class PricingAgent:
                         model_vision = genai.GenerativeModel(model_name)
                         
                         prompt_vision = (
-                            "You are an expert appraiser. Look at this item. "
-                            "Assess the condition coefficient visually (0.5 for bad/broken to 1.0 for perfect). "
-                            "Output pure JSON STRICTLY in this format, without codeblocks:\n"
-                            "{\"coefficient\": 0.95, \"reason\": \"Кілька незначних подряпин на корпусі.\"}"
+                            f"You are an expert appraiser. Read the description: '{str(description)[:500]}' and look at the item photo. "
+                            "Find any defects mentioned in the text (like scratches, battery health, missing kit, etc) and combine them with what you see in the photo. "
+                            "Give a SINGLE unified condition coefficient from 0.5 (bad/broken) to 1.0 (perfect). "
+                            "Output pure JSON STRICTLY in this format, without codeblocks (reason MUST be in Ukrainian):\n"
+                            "{\"coefficient\": 0.85, \"reason\": \"На фото видно знос, а в описі вказано про відсутність коробки.\"}"
                         )
                         
                         kwargs = {}
-                        if any(v in model_name for v in ['1.5', '2.0', '2.5']):
+                        if any(v in model_name for v in ['1.5', '2.0', '2.5', '3.1']):
                             kwargs['generation_config'] = genai.GenerationConfig(response_mime_type="application/json")
                             
                         response_vision = model_vision.generate_content([img, prompt_vision], **kwargs)
@@ -274,7 +275,7 @@ class PricingAgent:
             },
             "analogs": comparatives,
             "vision": {
-                "coefficient": vision_result.get("coefficient", 0.8),
+                "coefficient": vision_result.get("coefficient", 1.0),
                 "reason": vision_result.get("reason", "Дефолтний результат.") + f" (Категорія: {guessed_category})"
             }
         }
