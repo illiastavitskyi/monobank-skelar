@@ -1,5 +1,6 @@
 import tempfile
 import os
+from typing import List
 from fastapi import FastAPI, File, UploadFile, Form
 from fastapi.responses import HTMLResponse, JSONResponse
 from dotenv import load_dotenv
@@ -19,25 +20,28 @@ async def read_root():
 @app.post("/analyze")
 async def analyze_item(
     title: str = Form(...),
-    file: UploadFile = File(...)
+    files: List[UploadFile] = File(...)
 ):
     try:
-        # Save uploaded image temporarily
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp_file:
-            content = await file.read()
-            tmp_file.write(content)
-            tmp_image_path = tmp_file.name
-
+        tmp_image_paths = []
         try:
+            # Save uploaded images temporarily
+            for file in files:
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp_file:
+                    content = await file.read()
+                    tmp_file.write(content)
+                    tmp_image_paths.append(tmp_file.name)
+
             # We call the new method analyze_for_frontend
-            result = agent.analyze_for_frontend(description=title, image_path=tmp_image_path)
+            result = agent.analyze_for_frontend(description=title, image_paths=tmp_image_paths)
             return JSONResponse(content=result)
         finally:
-            try:
-                if os.path.exists(tmp_image_path):
-                    os.remove(tmp_image_path)
-            except Exception as cleanup_err:
-                pass
+            for p in tmp_image_paths:
+                try:
+                    if os.path.exists(p):
+                        os.remove(p)
+                except Exception:
+                    pass
     except Exception as e:
         import traceback
         traceback.print_exc()

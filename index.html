@@ -94,7 +94,7 @@
                 <div class="dz-text" id="dzText">Кинь фотку або <span>вибери</span></div>
                 <div id="preview"></div>
             </div>
-            <input type="file" id="fileInput" accept="image/*" style="display:none" onchange="handleFiles(this.files)">
+            <input type="file" id="fileInput" accept="image/*" multiple style="display:none" onchange="handleFiles(this.files)">
 
             <div id="p1_results" style="display:none" class="fade">
                 <div class="hero-priceHero" style="text-align:center; padding: 15px; background: rgba(255,255,255,0.03); border-radius: 15px;">
@@ -126,26 +126,26 @@
             <div style="margin-top:15px; flex:1;">
                 <span class="input-label">Уточни деталі (QA)</span>
                 
-                <label class="dz-text">Стан акумулятора?</label>
-                <select id="qa_battery">
-                    <option value="1.0">Ідеальний (>90%)</option>
-                    <option value="0.9">Нормальний (80-90%)</option>
-                    <option value="0.8">Слабкий (<80%)</option>
+                <label class="dz-text">Сліди використання (Візуал)?</label>
+                <select id="qa_visual">
+                    <option value="1.0">Відсутні (Як новий)</option>
+                    <option value="0.95">Незначні потертості</option>
+                    <option value="0.85">Помітні подряпини/сліди</option>
+                    <option value="0.70">Сильні пошкодження / Дефекти</option>
                 </select>
 
-                <label class="dz-text">Подряпини на екрані?</label>
-                <select id="qa_screen">
-                    <option value="1.0">Відсутні (Ідеал)</option>
-                    <option value="0.93">Мікро-царапини</option>
-                    <option value="0.8">Глибокі подряпини</option>
-                    <option value="0.6">Тріщина</option>
+                <label class="dz-text">Функціональний стан?</label>
+                <select id="qa_func">
+                    <option value="1.0">Повністю справний (Ідеал)</option>
+                    <option value="0.90">Дрібні недоліки в роботі</option>
+                    <option value="0.50">Потребує ремонту / Не працює</option>
                 </select>
                 
-                <label class="dz-text">Комплектація?</label>
+                <label class="dz-text">Комплектація / Пакування?</label>
                 <select id="qa_kit">
-                    <option value="1.0">Повний комплект</option>
-                    <option value="0.97">Тільки телефон і кабель</option>
-                    <option value="0.95">Тільки телефон</option>
+                    <option value="1.0">Повний оригінальний комплект</option>
+                    <option value="0.95">Неповний комплект / Немає коробки</option>
+                    <option value="0.90">Тільки сам предмет</option>
                 </select>
             </div>
 
@@ -186,7 +186,7 @@
 </div>
 
 <script>
-    let selectedFile = null;
+    let selectedFiles = [];
     let serverData = null; // Тут зберігаємо відповідь сервера
 
     // Стандартна обробка часу і Drag&Drop
@@ -206,16 +206,17 @@
 
     function handleFiles(files) {
         if (files.length === 0) return;
-        selectedFile = files[0];
+        selectedFiles = Array.from(files).slice(0, 5);
         document.getElementById('dzText').style.display = 'none';
         const preview = document.getElementById('preview');
-        preview.innerHTML = `<img src="${URL.createObjectURL(selectedFile)}" class="preview-img fade">`;
+        preview.innerHTML = `<div style="display:flex; flex-wrap:wrap; gap:5px; justify-content:center; margin-top:10px;">` + 
+            selectedFiles.map(f => `<img src="${URL.createObjectURL(f)}" class="fade" style="width:60px; height:60px; border-radius:8px; object-fit:cover; border:1px solid var(--border);">`).join('') + `</div>`;
     }
 
     // КРОК 1: АНАЛІЗ БАЗИ ТА VISION
     async function startAnalysis() {
         const title = document.getElementById('desc').value.trim();
-        if (!title || !selectedFile) { alert("Введіть опис і додайте фото, курва!"); return; }
+        if (!title || selectedFiles.length === 0) { alert("Введіть опис і додайте хоча б одне фото (до 5)!"); return; }
 
         const btn = document.getElementById('btn_p1');
         const results1 = document.getElementById('p1_results');
@@ -231,7 +232,7 @@
         try {
             const form = new FormData();
             form.append('title', title);
-            form.append('file', selectedFile);
+            selectedFiles.forEach(f => form.append('files', f));
 
             const res = await fetch('/analyze', { method: 'POST', body: form });
             serverData = await res.json();
@@ -269,14 +270,14 @@
         btn.textContent = 'Рахуємо QA...';
 
         // Витягуємо коефіцієнти з Interactive QA
-        const k_battery = parseFloat(document.getElementById('qa_battery').value);
-        const k_screen = parseFloat(document.getElementById('qa_screen').value);
+        const k_visual = parseFloat(document.getElementById('qa_visual').value);
+        const k_func = parseFloat(document.getElementById('qa_func').value);
         const k_kit = parseFloat(document.getElementById('qa_kit').value);
 
         // Синтез фінального коефіцієнта стану (C)
-        // Формула: C = Gemini_Vision * Battery * Screen * Kit
+        // Формула: C = Gemini_Vision * Visual * Func * Kit
         const vision_coeff = serverData.vision.coefficient;
-        let final_condition_coeff = vision_coeff * k_battery * k_screen * k_kit;
+        let final_condition_coeff = vision_coeff * k_visual * k_func * k_kit;
         
         // Жорсткий Floor (стан не може бути менше 35%, навіть якщо все розбито)
         final_condition_coeff = Math.max(final_condition_coeff, 0.35);
@@ -294,7 +295,7 @@
         document.getElementById('strat_mid').textContent = fmt(final_prices.balanced);
         document.getElementById('strat_max').textContent = fmt(final_prices.max);
         
-        const formulaStr = `XGB(${fmt(serverData.prices.balanced)}) * Vis(${Math.round(vision_coeff*100)}%) * QA(${Math.round(k_battery*k_screen*k_kit*100)}%)`;
+        const formulaStr = `XGB(${fmt(serverData.prices.balanced)}) * Vis(${Math.round(vision_coeff*100)}%) * QA(${Math.round(k_visual * k_func * k_kit * 100)}%)`;
         document.getElementById('final_formula').textContent = formulaStr;
 
         // Показуємо третій телефон

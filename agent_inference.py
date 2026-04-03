@@ -12,6 +12,7 @@ from PIL import Image
 import joblib
 import os
 import json
+import time
 from collections import Counter
 import google.generativeai as genai
 from dotenv import load_dotenv
@@ -132,25 +133,36 @@ class PricingAgent:
             "comp_prob_0": probs_comp[0], "comp_prob_1": probs_comp[1]
         }
 
-    def get_visual_competitor_price(self, image_path, description_fallback="", n_results=15):
-        with Image.open(image_path) as f_img:
-            image = f_img.convert("RGB")
-        
-        with torch.no_grad():
-            inputs = self.clip_processor(images=image, return_tensors="pt").to(DEVICE)
-            features = self.clip_model.get_image_features(**inputs)
-            
-            # Якщо features це об'єкт (наприклад BaseModelOutputWithPooling), дістаємо тензор
-            if not isinstance(features, torch.Tensor):
-                if hasattr(features, 'image_embeds'):
-                    features = features.image_embeds
-                elif hasattr(features, 'pooler_output'):
-                    features = features.pooler_output
-                else:
-                    features = features[0]
+    def get_visual_competitor_price(self, image_paths, description_fallback="", n_results=15):
+        embs = []
+        for path in image_paths:
+            try:
+                with Image.open(path) as f_img:
+                    image = f_img.convert("RGB")
+                
+                with torch.no_grad():
+                    inputs = self.clip_processor(images=image, return_tensors="pt").to(DEVICE)
+                    features = self.clip_model.get_image_features(**inputs)
                     
-            features = features / features.norm(p=2, dim=-1, keepdim=True)
-            emb = features.cpu().numpy().tolist()[0]
+                    if not isinstance(features, torch.Tensor):
+                        if hasattr(features, 'image_embeds'):
+                            features = features.image_embeds
+                        elif hasattr(features, 'pooler_output'):
+                            features = features.pooler_output
+                        else:
+                            features = features[0]
+                            
+                    features = features / features.norm(p=2, dim=-1, keepdim=True)
+                    emb = features.cpu().numpy().tolist()[0]
+                    embs.append(emb)
+            except Exception as e:
+                logging.error(f"Error processing image {path} for CLIP: {e}")
+                
+        if not embs:
+            return DEFAULT_VISUAL_PRICE, [], 4
+            
+        # Усереднення векторних ознак (mean pooling)
+        emb = np.mean(embs, axis=0).tolist()
             
         results = self.collection.query(query_embeddings=[emb], n_results=n_results)
         neighbor_prices = []
@@ -192,14 +204,17 @@ class PricingAgent:
             
         return avg_price, similar_items_info[:5], predicted_category
 
-    def analyze_for_frontend(self, description, image_path):
-        logging.info("Analyze for frontend started...")
+    def analyze_for_frontend(self, description, image_paths):
+        t_start = time.time()
+        logging.info(f"Analyze for frontend started... (Multiple Photos: {len(image_paths)})")
         
         # 1. Base Prices via XGBoost & ChromaDB (k-NN category)
+        t0 = time.time()
         text_features = self.extract_text_features(description)
-        visual_price, comparatives, guessed_category = self.get_visual_competitor_price(image_path, description_fallback=str(description), n_results=20)
-        logging.info(f"k-NN predicted category: {guessed_category}")
+        visual_price, comparatives, guessed_category = self.get_visual_competitor_price(image_paths, description_fallback=str(description), n_results=20)
+        logging.info(f"k-NN predicted category: {guessed_category} | Vectors + k-NN Time: {time.time() - t0:.2f}s")
         
+        t1 = time.time()
         if self.tfidf:
             text_tfidf = self.tfidf.transform([str(description)]).toarray()[0]
         else:
@@ -225,15 +240,25 @@ class PricingAgent:
         price_fast = float(self.model_fast.predict(df_input)[0])
         price_bal = float(self.model_bal.predict(df_input)[0])
         price_max = float(self.model_max.predict(df_input)[0])
+        
+        logging.info(f"XGBoost Prediction Time: {time.time() - t1:.2f}s")
 
         # 2. Vision Assessment via Gemini
+        t2 = time.time()
         vision_result = {"coefficient": 1.0, "reason": "Помилка аналізу. Дефолт."}
         try:
             available_models = ['gemini-3.1-flash-lite-preview']
             response_vision = None
             
-            with Image.open(image_path) as img:
-                for model_name in available_models:
+            # Load all images
+            pil_images = []
+            for p in image_paths:
+                try:
+                    pil_images.append(Image.open(p))
+                except:
+                    pass
+            
+            for model_name in available_models:
                     try:
                         logging.info(f"Trying Gemini model: {model_name}")
                         model_vision = genai.GenerativeModel(model_name)
@@ -250,7 +275,9 @@ class PricingAgent:
                         if any(v in model_name for v in ['1.5', '2.0', '2.5', '3.1']):
                             kwargs['generation_config'] = genai.GenerationConfig(response_mime_type="application/json")
                             
-                        response_vision = model_vision.generate_content([img, prompt_vision], **kwargs)
+                        # Feed all images + prompt to Gemini Multi-modal
+                        prompt_parts = pil_images + [prompt_vision]
+                        response_vision = model_vision.generate_content(prompt_parts, **kwargs)
                         
                         raw_text = response_vision.text.replace("```json", "").replace("```", "").strip()
                         vision_result = json.loads(raw_text)
@@ -266,6 +293,9 @@ class PricingAgent:
         except Exception as e:
             logging.error(f"Gemini API Error: {e}")
             vision_result["reason"] = f"Помилка Gemini API: {str(e)}"
+            
+        logging.info(f"Gemini Vision API Time: {time.time() - t2:.2f}s")
+        logging.info(f"Total Pipeline Time: {time.time() - t_start:.2f}s")
             
         return {
             "prices": {
