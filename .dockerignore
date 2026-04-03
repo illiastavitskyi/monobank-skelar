@@ -1,0 +1,14 @@
+.git/
+.idea/
+.venv/
+.env
+__pycache__/
+*.pyc
+
+# Training and experiment code — not needed in the image
+training/
+experiments/
+notebooks/
+
+# Data files are mounted as a volume at runtime
+data/

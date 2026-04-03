@@ -1,0 +1,49 @@
+[project]
+name = "monobazar-pricing-agent"
+version = "0.1.0"
+description = "AI-powered pricing recommendation agent for Monobazar second-hand marketplace"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "python-multipart",
+    "python-dotenv",
+    "torch",
+    "transformers",
+    "chromadb",
+    "pandas",
+    "numpy",
+    "xgboost",
+    "Pillow",
+    "joblib",
+    "google-generativeai",
+    "requests",
+    "urllib3",
+    "tqdm",
+    "scikit-learn",
+]
+
+[dependency-groups]
+training = [
+    "tqdm",
+    "scikit-learn",
+    "xgboost",
+    "torch",
+    "transformers",
+    "chromadb",
+    "pandas",
+    "requests",
+    "Pillow",
+    "joblib",
+]
+dev = [
+    "jupyter",
+    "ipykernel",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
