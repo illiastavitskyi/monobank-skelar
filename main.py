@@ -1,7 +1,9 @@
 import os
 import tempfile
+import traceback
 from typing import List
 
+import uvicorn
 from fastapi import FastAPI, File, UploadFile, Form
 from fastapi.responses import HTMLResponse, JSONResponse
 
@@ -29,7 +31,6 @@ async def analyze_item(title: str = Form(...), files: List[UploadFile] = File(..
         result = agent.analyze(description=title, image_paths=tmp_paths)
         return JSONResponse(content=result.to_dict())
     except Exception as e:
-        import traceback
         traceback.print_exc()
         return JSONResponse(status_code=500, content={"error": str(e)})
     finally:
@@ -41,5 +42,4 @@ async def analyze_item(title: str = Form(...), files: List[UploadFile] = File(..
 
 
 if __name__ == "__main__":
-    import uvicorn
     uvicorn.run("main:app", host=HOST, port=PORT, reload=RELOAD)

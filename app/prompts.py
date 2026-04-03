@@ -1,7 +1,5 @@
 def build_vision_prompt(description: str) -> str:
-    """Prompt for Gemini multimodal vision assessment.
-    Returns JSON: {"coefficient": float (0.5–1.0), "reason": str (Ukrainian)}
-    """
+    """Prompt for Gemini multimodal vision assessment"""
     return (
         f"You are an expert appraiser. Read the description: '{description[:500]}' "
         "and look at the item photo. Find any defects mentioned in the text "

@@ -1,9 +1,3 @@
-"""
-Legacy pipeline methods — superseded by PricingAgent.analyze() in app/agent.py.
-predict() used Gemini LLM text generation with build_prompt().
-predict_without_category() used Gemini Vision to infer the category first.
-
-"""
 import json
 import logging
 

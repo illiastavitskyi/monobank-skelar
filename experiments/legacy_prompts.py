@@ -1,7 +1,3 @@
-"""
-Legacy prompt builder — was used by the old predict() / predict_without_category() pipeline.
-Kept here for reference. Not used in the production app.
-"""
 import json
 
 SYSTEM_ROLE = (

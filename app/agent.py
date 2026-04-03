@@ -97,10 +97,6 @@ class PricingAgent:
 
         logging.info("PricingAgent ready.")
 
-    # ------------------------------------------------------------------ #
-    # Internal helpers                                                     #
-    # ------------------------------------------------------------------ #
-
     def _text_features(self, text: str) -> dict:
         encoding = self.tokenizer(
             text, truncation=True, padding="max_length", max_length=128, return_tensors="pt"
@@ -202,10 +198,6 @@ class PricingAgent:
         except Exception as e:
             logging.error(f"Gemini vision assessment failed: {e}")
             return VisionAssessment(coefficient=1.0, reason=f"Помилка аналізу: {e}")
-
-    # ------------------------------------------------------------------ #
-    # Public API                                                           #
-    # ------------------------------------------------------------------ #
 
     def analyze(self, description: str, image_paths: List[str]) -> AnalysisResult:
         t_start = time.time()
