@@ -126,6 +126,8 @@ class PricingAgent:
                     features = self.clip_model.get_image_features(
                         **self.clip_processor(images=image, return_tensors="pt").to(DEVICE)
                     )
+                    if hasattr(features, "pooler_output"):
+                        features = features.pooler_output
                     features = features / features.norm(p=2, dim=-1, keepdim=True)
                     embeddings.append(features.cpu().numpy()[0])
             except Exception as e:
